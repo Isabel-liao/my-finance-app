@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>智慧記帳系統</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        body { font-family: 'Noto Sans TC', sans-serif; -webkit-tap-highlight-color: transparent; }
+        input::-webkit-outer-spin-button,
+        input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+        .tab-active { background-color: white !important; color: #4f46e5 !important; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); }
+        #toast { visibility: hidden; min-width: 200px; background-color: #334155; color: #fff; text-align: center; border-radius: 50px; padding: 12px 24px; position: fixed; z-index: 100; left: 50%; bottom: 100px; transform: translateX(-50%); font-weight: bold; font-size: 14px; transition: all 0.3s; }
+        #toast.show { visibility: visible; opacity: 1; }
+        .calc-btn { @apply h-full flex items-center justify-center bg-white/10 rounded-xl font-bold active:bg-white/30 transition-colors; }
+    </style>
+</head>
+<body class="bg-gray-100">
+    <div id="root"></div>
+    <div id="toast"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useCallback } = React;
+        
+        const Icon = ({ name, className, onClick }) => {
+            useEffect(() => {
+                if (window.lucide) window.lucide.createIcons();
+            }, [name, onClick]);
+            return <i data-lucide={name} className={className} onClick={onClick}></i>;
+        };
+
+        const CATEGORY_CONFIG = {
+            types: ['支出', '收入'],
+            items: {
+                '收入': ['薪資', '存款利息', '投資收益', '資金調撥(入)', '其他'],
+                '支出': [
+                    '餐飲', '運動(跳舞)', '運動(羽球)', '造型穿搭', '國內交通', 
+                    '影音串流(Spotify)', '影音串流(Netflix)', '影音串流(Fridays)', 
+                    '旅遊(餐飲)', '旅遊(機+酒)', '旅遊(保險)', '旅遊(其他)', 
+                    '保險(國泰重大傷病)', 
+                    '股票定期定額(0050)', '股票定期定額(2317)', '股票定期定額(2891)', 
+                    '資金調撥(出)', '信用卡扣款', '其他'
+                ],
+            },
+            channels: ['國內實體', '國內線上', '海外實體', '海外線上'],
+            currencies: ['TWD', 'JPY', 'USD', 'PEN'],
+            methods: ['銀行帳戶', '信用卡', 'Line Pay', 'Apple Pay', 'Splitwise', '現金'],
+            tools: {
+                '銀行帳戶': ['台新Richart - #35619', '國泰 - #49812', '台北富邦 - #72441', '永豐(數位) - #06651', '中信 - #50698', '玉山 - #09182', '渣打(數位) - #65357', '合庫 - #14820', '一銀(數位) - #39361', '華南 - #35987', '彰化 - #37300'],
+                '信用卡': ['台新gogo', '台新遠傳', '富邦J', '富邦Cosco', '永豐大戶', '中信linepay', '一銀iLeo', '星展eco永續', '玉山山隆加油'],
+                'Line Pay': ['一銀iLeo', '中信linepay', '富邦J'],
+                'Apple Pay': ['永豐大戶', '富邦J', '中信linepay', '台新gogo'],
+                'Splitwise': ['Splitwise-魚', 'Splitwise-大庭', 'Splitwise-蓉'],
+                '現金': ['現金', 'Suica']
+            },
+            quickNotes: ['(無)', '秘魯', '日本']
+        };
+
+        function App() {
+            const [activeTab, setActiveTab] = useState('input');
+            const [transactions, setTransactions] = useState([]);
+            const [editingId, setEditingId] = useState(null);
+            const [googleSheetUrl, setGoogleSheetUrl] = useState('');
+            const [isSyncing, setIsSyncing] = useState(false);
+            const [isFetchingRate, setIsFetchingRate] = useState(false);
+            const [syncProgress, setSyncProgress] = useState({ current: 0, total: 0 });
+            
+            const [showCalc, setShowCalc] = useState(false);
+            const [calcDisplay, setCalcDisplay] = useState('');
+
+            const getInitialForm = () => ({
+                date: new Date().toISOString().split('T')[0],
+                type: '支出',
+                item: '餐飲',
+                channel: '國內實體',
+                currency: 'TWD',
+                method: '銀行帳戶',
+                tool: CATEGORY_CONFIG.tools['銀行帳戶'][0],
+                originalAmount: '',
+                rate: '1.00',
+                twdAmount: '0',
+                note: ''
+            });
+
+            const [formData, setFormData] = useState(getInitialForm());
+
+            useEffect(() => {
+                const localData = localStorage.getItem('finance_records_v2');
+                if (localData) {
+                    try { setTransactions(JSON.parse(localData)); } catch(e) { console.error(e); }
+                }
+                const savedUrl = localStorage.getItem('gas_url');
+                if (savedUrl) setGoogleSheetUrl(savedUrl);
+            }, []);
+
+            const showToast = (msg) => {
+                const x = document.getElementById("toast");
+                x.innerText = msg;
+                x.className = "show";
+                setTimeout(() => { x.className = x.className.replace("show", ""); }, 3000);
+            };
+
+            const fetchRate = useCallback(async (currency) => {
+                if (currency === 'TWD') {
+                    setFormData(prev => ({ ...prev, rate: '1.00' }));
+                    return;
+                }
+                setIsFetchingRate(true);
+                try {
+                    const response = await fetch(`https://open.er-api.com/v6/latest/${currency}`);
+                    const data = await response.json();
+                    if (data?.rates?.TWD) {
+                        setFormData(prev => ({ ...prev, rate: data.rates.TWD.toFixed(4) }));
+                    }
+                } catch (error) {
+                    showToast('匯率取得失敗');
+                } finally {
+                    setIsFetchingRate(false);
+                }
+            }, []);
+
+            useEffect(() => {
+                const amount = parseFloat(formData.originalAmount) || 0;
+                const rate = parseFloat(formData.rate) || 0;
+                setFormData(prev => ({ ...prev, twdAmount: Math.round(amount * rate).toString() }));
+            }, [formData.originalAmount, formData.rate]);
+
+            const handleInputChange = (e) => {
+                const { name, value } = e.target;
+                setFormData(prev => {
+                    const next = { ...prev, [name]: value };
+                    if (name === 'type') next.item = CATEGORY_CONFIG.items[value][0];
+                    if (name === 'method') next.tool = CATEGORY_CONFIG.tools[value]?.[0] || '';
+                    if (name === 'currency') fetchRate(value);
+                    return next;
+                });
+            };
+
+            const handleCalcPress = (val) => {
+                if (val === 'C') {
+                    setCalcDisplay('');
+                } else if (val === 'DEL') {
+                    setCalcDisplay(prev => prev.slice(0, -1));
+                } else if (val === '=') {
+                    try {
+                        const sanitized = calcDisplay.replace(/[^-+*/.0-9]/g, '');
+                        if (!sanitized) return;
+                        const result = eval(sanitized);
+                        const finalVal = result ? (Math.round(result * 100) / 100).toString() : '0';
+                        setCalcDisplay(finalVal);
+                        setFormData(prev => ({ ...prev, originalAmount: finalVal }));
+                        setShowCalc(false);
+                    } catch (e) {
+                        showToast('算式錯誤');
+                    }
+                } else {
+                    setCalcDisplay(prev => prev + val);
+                }
+            };
+
+            const syncSingle = async (record, isDelete = false) => {
+                if (!googleSheetUrl) return false;
+                try {
+                    const payload = isDelete ? { id: record.id, action: 'delete' } : record;
+                    await fetch(googleSheetUrl, {
+                        method: 'POST',
+                        mode: 'no-cors',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    return true;
+                } catch (e) {
+                    console.warn(e);
+                    return false;
+                }
+            };
+
+            const handleSave = async () => {
+                if (!formData.originalAmount) { showToast('請輸入金額'); return; }
+                
+                setIsSyncing(true);
+                const recordToSave = { ...formData, id: editingId || Date.now() };
+                
+                let updatedList;
+                if (editingId) {
+                    updatedList = transactions.map(t => t.id === editingId ? recordToSave : t);
+                } else {
+                    updatedList = [recordToSave, ...transactions];
+                }
+                setTransactions(updatedList);
+                localStorage.setItem('finance_records_v2', JSON.stringify(updatedList));
+
+                const success = await syncSingle(recordToSave);
+                
+                setIsSyncing(false);
+                showToast(success ? '儲存並同步成功' : '本地已儲存，雲端同步失敗');
+                
+                setEditingId(null);
+                setFormData(getInitialForm());
+                setActiveTab('history');
+            };
+
+            const handleDelete = async (id, e) => {
+                e.stopPropagation();
+                if (!confirm('確定要刪除這筆資料嗎？\n(此動作將同步移除 Google 試算表中的資料)')) return;
+
+                const recordToDelete = transactions.find(t => t.id === id);
+                if (!recordToDelete) return;
+
+                setIsSyncing(true);
+                
+                const success = await syncSingle(recordToDelete, true);
+                
+                const updatedList = transactions.filter(t => t.id !== id);
+                setTransactions(updatedList);
+                localStorage.setItem('finance_records_v2', JSON.stringify(updatedList));
+
+                setIsSyncing(false);
+                showToast(success ? '已成功從雲端與本地刪除' : '本地已刪除，雲端同步失敗');
+            };
+
+            const handleSyncAll = async () => {
+                if (!googleSheetUrl || transactions.length === 0) { showToast('請檢查 URL 或資料'); return; }
+                if (!confirm(`確定同步全部 ${transactions.length} 筆資料？`)) return;
+
+                setIsSyncing(true);
+                setSyncProgress({ current: 0, total: transactions.length });
+
+                for (let i = 0; i < transactions.length; i++) {
+                    await syncSingle(transactions[i]);
+                    setSyncProgress(prev => ({ ...prev, current: i + 1 }));
+                    await new Promise(r => setTimeout(r, 200));
+                }
+
+                setIsSyncing(false);
+                setSyncProgress({ current: 0, total: 0 });
+                showToast('全部同步完成');
+            };
+
+            const monthlySummary = useMemo(() => {
+                const groups = {};
+                transactions.forEach(t => {
+                    const month = t.date.substring(0, 7);
+                    if (!groups[month]) groups[month] = { income: 0, expense: 0, balance: 0, items: [] };
+                    const amt = parseFloat(t.twdAmount) || 0;
+                    if (t.type === '收入') groups[month].income += amt;
+                    else groups[month].expense += amt;
+                    groups[month].balance = groups[month].income - groups[month].expense;
+                    groups[month].items.push(t);
+                });
+                return Object.keys(groups).sort((a, b) => b.localeCompare(a)).map(m => ({
+                    month: m,
+                    ...groups[m]
+                }));
+            }, [transactions]);
+
+            const totalSummary = useMemo(() => {
+                let income = 0, expense = 0;
+                transactions.forEach(t => {
+                    const amt = parseFloat(t.twdAmount) || 0;
+                    if (t.type === '收入') income += amt;
+                    else expense += amt;
+                });
+                return { income, expense, balance: income - expense };
+            }, [transactions]);
+
+            return (
+                <div className="max-w-md mx-auto min-h-screen bg-gray-50 flex flex-col relative overflow-hidden text-gray-800">
+                    {syncProgress.total > 0 && (
+                        <div className="fixed top-0 left-0 w-full h-1 z-50 bg-gray-200">
+                            <div className="h-full bg-indigo-600 transition-all duration-300" style={{ width: `${(syncProgress.current / syncProgress.total) * 100}%` }} />
+                        </div>
+                    )}
+
+                    <div className="p-4 flex justify-between items-center border-b bg-white sticky top-0 z-10">
+                        <h1 className="text-xl font-black flex items-center gap-2">
+                            <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white">
+                                <Icon name={isSyncing ? "refresh-cw" : "wallet"} className={`w-4 h-4 ${isSyncing ? 'animate-spin' : ''}`} />
+                            </div>
+                            {editingId ? "編輯明細" : "智慧記帳"}
+                        </h1>
+                        <button onClick={() => setActiveTab('settings')} className="p-2 hover:bg-gray-100 rounded-full">
+                            <Icon name="settings" className="w-5 h-5 text-gray-500" />
+                        </button>
+                    </div>
+
+                    <div className="flex-1 overflow-y-auto pb-32">
+                        {activeTab === 'input' && (
+                            <div className="p-4 space-y-4">
+                                <div className="bg-white rounded-3xl p-6 shadow-sm border space-y-4">
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <input type="date" name="date" value={formData.date} onChange={handleInputChange} className="w-full p-3 bg-gray-50 rounded-xl border-none text-sm font-medium outline-none" />
+                                        <select name="type" value={formData.type} onChange={handleInputChange} className="w-full p-3 bg-gray-50 rounded-xl border-none text-sm font-bold text-indigo-600 outline-none">
+                                            {CATEGORY_CONFIG.types.map(t => <option key={t} value={t}>{t}</option>)}
+                                        </select>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <select name="item" value={formData.item} onChange={handleInputChange} className="w-full p-3 bg-gray-50 rounded-xl border-none text-sm outline-none">
+                                            {CATEGORY_CONFIG.items[formData.type].map(i => <option key={i} value={i}>{i}</option>)}
+                                        </select>
+                                        <select name="channel" value={formData.channel} onChange={handleInputChange} className="w-full p-3 bg-gray-50 rounded-xl border-none text-sm outline-none">
+                                            {CATEGORY_CONFIG.channels.map(c => <option key={c} value={c}>{c}</option>)}
+                                        </select>
+                                    </div>
+
+                                    <div className="bg-indigo-600 rounded-3xl p-6 text-white shadow-lg space-y-4 relative overflow-hidden h-[180px]">
+                                        <div className="flex justify-between items-center gap-2">
+                                            <select name="currency" value={formData.currency} onChange={handleInputChange} className="bg-white/20 border-none rounded-lg text-white font-bold px-2 py-1 outline-none text-sm shrink-0">
+                                                {CATEGORY_CONFIG.currencies.map(c => <option key={c} value={c} className="text-black">{c}</option>)}
+                                            </select>
+                                            <div className="flex items-center gap-2 flex-1">
+                                                <input type="number" name="originalAmount" value={formData.originalAmount} onChange={handleInputChange} placeholder="0.00" className="bg-transparent text-right font-black text-3xl w-full outline-none placeholder:text-white/30" />
+                                                <button onClick={() => { setShowCalc(true); setCalcDisplay(formData.originalAmount || ''); }} className="p-2 bg-white/20 rounded-lg active:bg-white/40">
+                                                    <Icon name="calculator" className="w-5 h-5" />
+                                                </button>
+                                            </div>
+                                        </div>
+                                        <div className="flex justify-between items-center pt-2 border-t border-white/20">
+                                            <div className="flex items-center gap-1">
+                                                <input type="number" name="rate" step="0.0001" value={formData.rate} onChange={handleInputChange} className="bg-white/10 w-20 text-center rounded border-none text-xs py-1 outline-none font-bold" disabled={formData.currency === 'TWD'} />
+                                                {formData.currency !== 'TWD' && <Icon name="refresh-cw" className={`w-3 h-3 cursor-pointer ${isFetchingRate ? 'animate-spin' : ''}`} onClick={() => fetchRate(formData.currency)} />}
+                                            </div>
+                                            <span className="text-xl font-black italic">≈ NT$ {formData.twdAmount}</span>
+                                        </div>
+
+                                        {showCalc && (
+                                            <div className="absolute inset-0 bg-indigo-700 z-20 p-3 flex flex-col animate-in slide-in-from-bottom duration-200">
+                                                <div className="flex justify-between items-center mb-1 border-b border-white/20 pb-1">
+                                                    <span className="text-[10px] font-bold opacity-60">計算機</span>
+                                                    <div className="text-lg font-black truncate max-w-[120px]">{calcDisplay || '0'}</div>
+                                                    <button onClick={() => setShowCalc(false)} className="p-1"><Icon name="x" className="w-4 h-4" /></button>
+                                                </div>
+                                                <div className="grid grid-cols-4 gap-1 text-[11px] flex-1 min-h-0">
+                                                    {['7','8','9','/','4','5','6','*','1','2','3','-','0','.','C','+'].map(key => (
+                                                        <button key={key} onClick={() => handleCalcPress(key)} className="calc-btn">{key}</button>
+                                                    ))}
+                                                    <button onClick={() => handleCalcPress('DEL')} className="h-8 flex items-center justify-center bg-rose-500/30 rounded-xl font-bold col-span-2">刪除</button>
+                                                    <button onClick={() => handleCalcPress('=')} className="h-8 flex items-center justify-center bg-emerald-500 rounded-xl font-bold col-span-2 text-white">確認帶入</button>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <select name="method" value={formData.method} onChange={handleInputChange} className="w-full p-3 bg-gray-100 rounded-xl text-xs font-bold outline-none border-none">
+                                            {CATEGORY_CONFIG.methods.map(m => <option key={m} value={m}>{m}</option>)}
+                                        </select>
+                                        <select name="tool" value={formData.tool} onChange={handleInputChange} className="w-full p-3 bg-gray-100 rounded-xl text-[10px] outline-none border-none">
+                                            {CATEGORY_CONFIG.tools[formData.method].map(t => <option key={t} value={t}>{t}</option>)}
+                                        </select>
+                                    </div>
+
+                                    <textarea name="note" value={formData.note} onChange={handleInputChange} placeholder="備註..." className="w-full p-3 bg-gray-50 rounded-xl border-none text-sm h-20 outline-none resize-none" />
+
+                                    <button onClick={handleSave} disabled={isSyncing} className={`w-full text-white font-black py-4 rounded-2xl shadow-lg transition-all flex items-center justify-center gap-2 ${isSyncing ? 'bg-gray-400' : 'bg-indigo-600 active:scale-95'}`}>
+                                        <Icon name="save" className="w-5 h-5" />
+                                        {isSyncing ? "同步中..." : (editingId ? "更新並同步" : "確認儲存並同步")}
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {activeTab === 'dashboard' && (
+                            <div className="p-6 space-y-6">
+                                <div className="bg-white rounded-[2.5rem] p-8 shadow-sm border text-center">
+                                    <p className="text-gray-400 text-[10px] font-bold uppercase mb-2">全期結餘總計</p>
+                                    <h1 className="text-4xl font-black text-gray-900">${totalSummary.balance.toLocaleString()}</h1>
+                                </div>
+
+                                <div className="space-y-4">
+                                    <p className="text-xs font-black text-gray-400 px-2 uppercase tracking-widest">每月收支概覽</p>
+                                    {monthlySummary.map(m => (
+                                        <div key={m.month} className="bg-white rounded-3xl p-5 shadow-sm border space-y-4">
+                                            <div className="flex justify-between items-center border-b pb-2">
+                                                <h3 className="font-black text-indigo-600">{m.month.replace('-', ' / ')}</h3>
+                                                <span className={`text-sm font-black ${m.balance >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                                                    結餘: ${m.balance.toLocaleString()}
+                                                </span>
+                                            </div>
+                                            <div className="grid grid-cols-2 gap-4">
+                                                <div className="bg-emerald-50 p-3 rounded-2xl border border-emerald-100">
+                                                    <p className="text-[10px] text-emerald-600 font-black">收入</p>
+                                                    <p className="text-md font-black text-emerald-700">${m.income.toLocaleString()}</p>
+                                                </div>
+                                                <div className="bg-rose-50 p-3 rounded-2xl border border-rose-100">
+                                                    <p className="text-[10px] text-rose-600 font-black">支出</p>
+                                                    <p className="text-md font-black text-rose-700">${m.expense.toLocaleString()}</p>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))}
+                                    {monthlySummary.length === 0 && <div className="text-center py-10 text-gray-300 font-bold">尚無統計資料</div>}
+                                </div>
+                            </div>
+                        )}
+
+                        {activeTab === 'history' && (
+                            <div className="p-4 space-y-6">
+                                {monthlySummary.length === 0 ? (
+                                    <div className="py-20 text-center text-gray-300 font-bold">尚無紀錄</div>
+                                ) : (
+                                    monthlySummary.map(monthGroup => (
+                                        <div key={monthGroup.month} className="space-y-2">
+                                            <div className="flex justify-between items-center px-2 py-1">
+                                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest">{monthGroup.month.replace('-', '年')}月</h3>
+                                                <span className="text-[10px] font-bold text-gray-300">共 {monthGroup.items.length} 筆</span>
+                                            </div>
+                                            <div className="space-y-2">
+                                                {monthGroup.items.map(t => (
+                                                    <div key={t.id} onClick={() => { setFormData(t); setEditingId(t.id); setActiveTab('input'); }} className="bg-white p-4 rounded-2xl border flex justify-between items-center shadow-sm active:bg-gray-50 cursor-pointer group relative">
+                                                        <div className="flex items-center gap-3">
+                                                            <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${t.type === '收入' ? 'bg-emerald-50 text-emerald-500' : 'bg-rose-50 text-rose-500'}`}>
+                                                                <Icon name={t.type === '收入' ? "arrow-down-circle" : "arrow-up-circle"} className="w-5 h-5" />
+                                                            </div>
+                                                            <div>
+                                                                <p className="font-bold text-sm">{t.item}</p>
+                                                                <p className="text-[10px] text-gray-400">{t.date} · {t.tool}</p>
+                                                            </div>
+                                                        </div>
+                                                        <div className="flex items-center gap-3">
+                                                            <div className="text-right">
+                                                                <p className={`font-black ${t.type === '收入' ? 'text-emerald-500' : 'text-gray-900'}`}>
+                                                                    {t.type === '收入' ? '+' : '-'}{parseInt(t.twdAmount).toLocaleString()}
+                                                                </p>
+                                                                {t.currency !== 'TWD' && <p className="text-[9px] text-gray-300 uppercase">{t.originalAmount} {t.currency}</p>}
+                                                            </div>
+                                                            <button 
+                                                                onClick={(e) => handleDelete(t.id, e)}
+                                                                className="p-2 text-gray-300 hover:text-rose-500 active:text-rose-600 transition-colors"
+                                                            >
+                                                                <Icon name="trash-2" className="w-4 h-4" />
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    ))
+                                )}
+                            </div>
+                        )}
+
+                        {activeTab === 'settings' && (
+                            <div className="p-4 space-y-4">
+                                <div className="bg-white rounded-3xl p-6 border space-y-4">
+                                    <h3 className="font-black flex items-center gap-2"><Icon name="cloud" className="w-5 h-5 text-indigo-500" />雲端同步設定</h3>
+                                    <input type="text" value={googleSheetUrl} onChange={(e) => setGoogleSheetUrl(e.target.value)} placeholder="GAS URL..." className="w-full p-3 bg-gray-50 rounded-xl border text-[10px] font-mono outline-none" />
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <button onClick={() => { localStorage.setItem('gas_url', googleSheetUrl); showToast('已儲存 URL'); }} className="bg-gray-900 text-white font-bold py-3 rounded-xl text-sm">儲存 URL</button>
+                                        <button onClick={handleSyncAll} disabled={isSyncing} className="bg-indigo-100 text-indigo-700 font-bold py-3 rounded-xl text-sm">全部同步</button>
+                                    </div>
+                                </div>
+                                <button onClick={() => { if(confirm('確定清除本地資料？')) { setTransactions([]); localStorage.removeItem('finance_records_v2'); } }} className="w-full py-3 text-rose-500 font-bold text-xs underline">清除本地快取資料</button>
+                            </div>
+                        )}
+                    </div>
+
+                    <nav className="fixed bottom-6 left-1/2 -translate-x-1/2 w-64 bg-gray-900 rounded-full p-2 flex shadow-2xl z-20 border border-white/10 backdrop-blur-sm">
+                        <button onClick={() => setActiveTab('dashboard')} className={`flex-1 py-3 rounded-full flex flex-col items-center transition-all ${activeTab === 'dashboard' ? 'tab-active' : 'text-gray-500'}`}><Icon name="layout-dashboard" className="w-5 h-5" /></button>
+                        <button onClick={() => { setActiveTab('input'); setEditingId(null); setFormData(getInitialForm()); }} className={`flex-1 py-3 rounded-full flex flex-col items-center transition-all ${activeTab === 'input' ? 'tab-active' : 'text-gray-500'}`}><Icon name="plus-circle" className="w-5 h-5" /></button>
+                        <button onClick={() => setActiveTab('history')} className={`flex-1 py-3 rounded-full flex flex-col items-center transition-all ${activeTab === 'history' ? 'tab-active' : 'text-gray-500'}`}><Icon name="list" className="w-5 h-5" /></button>
+                    </nav>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
