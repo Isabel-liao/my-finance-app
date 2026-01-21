@@ -18,6 +18,12 @@
         #toast.show { visibility: visible; opacity: 1; }
         .calc-btn { @apply h-full flex items-center justify-center bg-white/10 rounded-xl font-bold active:bg-white/30 transition-colors; }
     </style>
+    <!-- iOS 圖示 -->
+    <link rel="apple-touch-icon" href="你的圖示網址.png">
+    <!-- 設定啟動狀態列顏色 -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <!-- 隱藏 Safari 工具列 -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
 </head>
 <body class="bg-gray-100">
     <div id="root"></div>
@@ -472,4 +478,5 @@
         root.render(<App />);
     </script>
 </body>
+
 </html>
